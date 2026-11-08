@@ -2,15 +2,19 @@ local ADDON_NAME = ...
 local PREFIX = "|cffffd100Quest XP|r "
 
 local SOURCES = {
-	{ key = "kill", label = "Kills" },
-	{ key = "quest", label = "Quests" },
-	{ key = "explore", label = "Exploration" },
-	{ key = "other", label = "Other" },
+	{ key = "kill", label = "Kills", color = { 0.85, 0.3, 0.25 } },
+	{ key = "quest", label = "Quests", color = { 1, 0.82, 0 } },
+	{ key = "explore", label = "Exploration", color = { 0.35, 0.8, 0.4 } },
+	{ key = "other", label = "Other", color = { 0.6, 0.6, 0.6 } },
 }
+local ZONE_COLOR = { 0.35, 0.6, 0.9 }
 -- XP and the event naming its source arrive in either order, so both wait this long to meet.
 local SETTLE_SECONDS = 0.3
 local BAR_CONTAINERS = { "MainStatusTrackingBarContainer", "SecondaryStatusTrackingBarContainer" }
-local WINDOW = { width = 230, padding = 10, rowHeight = 14, headerHeight = 32, maxZones = 5 }
+local WINDOW = {
+	width = 280, padding = 10, rowHeight = 16, headerHeight = 32, maxZones = 5,
+	labelWidth = 92, valueWidth = 70, barHeight = 8, trackColor = { 1, 1, 1, 0.08 },
+}
 
 -- SageQoL_QuestXPDB.levels[level][zone][sourceKey] = xp
 local db
@@ -23,6 +27,8 @@ local logUntil = 0
 local hooked = {}
 local settingsCategory
 local window
+-- Fixed by the layout, so bars size correctly before the window has been laid out.
+local BAR_WIDTH = WINDOW.width - 2 * WINDOW.padding - WINDOW.labelWidth - WINDOW.valueWidth - 8
 
 local function Log(text)
 	if GetTime() < logUntil then print(PREFIX .. text) end
@@ -88,36 +94,51 @@ end
 local function GetRow(index)
 	local row = window.rows[index]
 	if not row then
-		row = {
-			left = window:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"),
-			right = window:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"),
-		}
-		local y = -(WINDOW.headerHeight + (index - 1) * WINDOW.rowHeight)
-		row.right:SetPoint("TOPRIGHT", -WINDOW.padding, y)
-		row.left:SetPoint("TOPLEFT", WINDOW.padding, y)
-		row.left:SetPoint("RIGHT", row.right, "LEFT", -6, 0)
-		row.left:SetJustifyH("LEFT")
-		row.left:SetWordWrap(false)
+		row = CreateFrame("Frame", nil, window)
+		row:SetHeight(WINDOW.rowHeight)
+		row:SetPoint("TOPLEFT", WINDOW.padding, -(WINDOW.headerHeight + (index - 1) * WINDOW.rowHeight))
+		row:SetPoint("RIGHT", -WINDOW.padding, 0)
+		row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		row.label:SetPoint("LEFT")
+		row.label:SetWidth(WINDOW.labelWidth)
+		row.label:SetJustifyH("LEFT")
+		row.label:SetWordWrap(false)
+		row.value = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		row.value:SetPoint("RIGHT")
+		row.value:SetWidth(WINDOW.valueWidth)
+		row.value:SetJustifyH("RIGHT")
+		row.track = row:CreateTexture(nil, "ARTWORK")
+		row.track:SetColorTexture(unpack(WINDOW.trackColor))
+		row.track:SetHeight(WINDOW.barHeight)
+		row.track:SetPoint("LEFT", WINDOW.labelWidth + 4, 0)
+		row.track:SetPoint("RIGHT", -(WINDOW.valueWidth + 4), 0)
+		row.fill = row:CreateTexture(nil, "OVERLAY")
+		row.fill:SetHeight(WINDOW.barHeight)
+		row.fill:SetPoint("LEFT", row.track)
 		window.rows[index] = row
 	end
 	return row
 end
 
+-- Each line is a bar row ({ label, value, fraction, color }) or a heading ({ label, heading = true }).
 local function WindowLines(level)
 	local bySource, zones, total = LevelTotals(level)
 	if total <= 0 then
-		return { { "No XP recorded yet", "", 0.6 } }
+		return { { label = "No XP recorded yet", heading = true } }
 	end
 	local lines = {}
 	for _, source in ipairs(SOURCES) do
 		local xp = bySource[source.key]
 		if xp then
-			table.insert(lines, { source.label, string.format("%s  %d%%", BreakUpLargeNumbers(xp), Percent(xp, total)), 1 })
+			table.insert(lines, { label = source.label, color = source.color, fraction = xp / total,
+				value = string.format("%s  %d%%", BreakUpLargeNumbers(xp), Percent(xp, total)) })
 		end
 	end
-	table.insert(lines, { " ", "", 1 })
+	table.insert(lines, { label = "Zones", heading = true })
 	for i = 1, math.min(#zones, WINDOW.maxZones) do
-		table.insert(lines, { zones[i].zone, string.format("%d%%", Percent(zones[i].xp, total)), 0.7 })
+		local entry = zones[i]
+		table.insert(lines, { label = entry.zone, color = ZONE_COLOR, fraction = entry.xp / total,
+			value = string.format("%d%%", Percent(entry.xp, total)) })
 	end
 	return lines
 end
@@ -132,17 +153,20 @@ local function RefreshWindow()
 	local lines = WindowLines(level)
 	for index, line in ipairs(lines) do
 		local row = GetRow(index)
-		local shade = line[3]
-		row.left:SetText(line[1])
-		row.right:SetText(line[2])
-		row.left:SetTextColor(shade, shade, shade)
-		row.right:SetTextColor(shade, shade, shade)
-		row.left:Show()
-		row.right:Show()
+		row.label:SetText(line.label)
+		row.label:SetFontObject(line.heading and "GameFontNormalSmall" or "GameFontHighlightSmall")
+		row.value:SetText(line.value or "")
+		row.track:SetShown(not line.heading)
+		row.fill:SetShown(not line.heading)
+		if not line.heading then
+			row.fill:SetColorTexture(line.color[1], line.color[2], line.color[3], 0.9)
+			-- A zero width would drop the texture's anchor, so the smallest bar is a sliver.
+			row.fill:SetWidth(math.max(line.fraction * BAR_WIDTH, 1))
+		end
+		row:Show()
 	end
 	for index = #lines + 1, #window.rows do
-		window.rows[index].left:Hide()
-		window.rows[index].right:Hide()
+		window.rows[index]:Hide()
 	end
 	window:SetHeight(WINDOW.headerHeight + #lines * WINDOW.rowHeight + WINDOW.padding)
 end
