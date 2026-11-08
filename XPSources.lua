@@ -7,10 +7,10 @@ local SOURCES = {
 	{ key = "explore", label = "Exploration" },
 	{ key = "other", label = "Other" },
 }
-local MAX_TOOLTIP_ZONES = 4
 -- XP and the event naming its source arrive in either order, so both wait this long to meet.
 local SETTLE_SECONDS = 0.3
 local BAR_CONTAINERS = { "MainStatusTrackingBarContainer", "SecondaryStatusTrackingBarContainer" }
+local WINDOW = { width = 230, padding = 10, rowHeight = 14, headerHeight = 32, maxZones = 5 }
 
 -- SageQoL_QuestXPDB.levels[level][zone][sourceKey] = xp
 local db
@@ -22,6 +22,7 @@ local flushScheduled = false
 local logUntil = 0
 local hooked = {}
 local settingsCategory
+local window
 
 local function Log(text)
 	if GetTime() < logUntil then print(PREFIX .. text) end
@@ -37,6 +38,171 @@ local function Record(level, zone, source, xp)
 	local zones = db.levels[level]
 	zones[zone] = zones[zone] or {}
 	zones[zone][source] = (zones[zone][source] or 0) + xp
+end
+
+local function LevelTotals(level)
+	local bySource, byZone, total = {}, {}, 0
+	for zone, sources in pairs(db.levels[level] or {}) do
+		for source, xp in pairs(sources) do
+			bySource[source] = (bySource[source] or 0) + xp
+			byZone[zone] = (byZone[zone] or 0) + xp
+			total = total + xp
+		end
+	end
+	local zones = {}
+	for zone, xp in pairs(byZone) do table.insert(zones, { zone = zone, xp = xp }) end
+	table.sort(zones, function(a, b) return a.xp > b.xp end)
+	return bySource, zones, total
+end
+
+local function Percent(part, total)
+	return math.floor(part / total * 100 + 0.5)
+end
+
+local function RecordedLevels()
+	local levels = {}
+	for level in pairs(db.levels) do table.insert(levels, level) end
+	table.sort(levels)
+	return levels
+end
+
+-- window.level is nil while the window follows the current level.
+local function ShownLevel()
+	return window.level or UnitLevel("player")
+end
+
+-- The nearest recorded past level before (direction -1) or after (+1) the shown one.
+-- Stepping forward past the last one returns to the current level.
+local function StepLevel(direction)
+	local shown, current = ShownLevel(), UnitLevel("player")
+	local target
+	for _, level in ipairs(RecordedLevels()) do
+		if level < current then
+			if direction < 0 and level < shown and (not target or level > target) then target = level end
+			if direction > 0 and level > shown and (not target or level < target) then target = level end
+		end
+	end
+	return target
+end
+
+local function GetRow(index)
+	local row = window.rows[index]
+	if not row then
+		row = {
+			left = window:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"),
+			right = window:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"),
+		}
+		local y = -(WINDOW.headerHeight + (index - 1) * WINDOW.rowHeight)
+		row.right:SetPoint("TOPRIGHT", -WINDOW.padding, y)
+		row.left:SetPoint("TOPLEFT", WINDOW.padding, y)
+		row.left:SetPoint("RIGHT", row.right, "LEFT", -6, 0)
+		row.left:SetJustifyH("LEFT")
+		row.left:SetWordWrap(false)
+		window.rows[index] = row
+	end
+	return row
+end
+
+local function WindowLines(level)
+	local bySource, zones, total = LevelTotals(level)
+	if total <= 0 then
+		return { { "No XP recorded yet", "", 0.6 } }
+	end
+	local lines = {}
+	for _, source in ipairs(SOURCES) do
+		local xp = bySource[source.key]
+		if xp then
+			table.insert(lines, { source.label, string.format("%s  %d%%", BreakUpLargeNumbers(xp), Percent(xp, total)), 1 })
+		end
+	end
+	table.insert(lines, { " ", "", 1 })
+	for i = 1, math.min(#zones, WINDOW.maxZones) do
+		table.insert(lines, { zones[i].zone, string.format("%d%%", Percent(zones[i].xp, total)), 0.7 })
+	end
+	return lines
+end
+
+local function RefreshWindow()
+	if not (window and window:IsShown()) then return end
+	local level = ShownLevel()
+	window.title:SetFormattedText("Level %d XP", level)
+	window.prev:SetEnabled(StepLevel(-1) ~= nil)
+	window.next:SetEnabled(window.level ~= nil)
+
+	local lines = WindowLines(level)
+	for index, line in ipairs(lines) do
+		local row = GetRow(index)
+		local shade = line[3]
+		row.left:SetText(line[1])
+		row.right:SetText(line[2])
+		row.left:SetTextColor(shade, shade, shade)
+		row.right:SetTextColor(shade, shade, shade)
+		row.left:Show()
+		row.right:Show()
+	end
+	for index = #lines + 1, #window.rows do
+		window.rows[index].left:Hide()
+		window.rows[index].right:Hide()
+	end
+	window:SetHeight(WINDOW.headerHeight + #lines * WINDOW.rowHeight + WINDOW.padding)
+end
+
+local function CreateArrow(text, direction)
+	local button = CreateFrame("Button", nil, window, "UIPanelButtonTemplate")
+	button:SetSize(22, 18)
+	button:SetText(text)
+	button:SetScript("OnClick", function()
+		window.level = StepLevel(direction)
+		RefreshWindow()
+	end)
+	return button
+end
+
+local function CreateWindow()
+	window = CreateFrame("Frame", "SageQoLXPSourcesWindow", UIParent, "TooltipBackdropTemplate")
+	window:SetWidth(WINDOW.width)
+	window:SetFrameStrata("MEDIUM")
+	window:SetClampedToScreen(true)
+	window:SetMovable(true)
+	window:EnableMouse(true)
+	window:RegisterForDrag("LeftButton")
+	window:SetScript("OnDragStart", window.StartMoving)
+	window:SetScript("OnDragStop", function()
+		window:StopMovingOrSizing()
+		local point, _, relativePoint, x, y = window:GetPoint()
+		db.settings.position = { point, relativePoint, x, y }
+	end)
+	local position = db.settings.position
+	if position then
+		window:SetPoint(position[1], UIParent, position[2], position[3], position[4])
+	else
+		window:SetPoint("CENTER", UIParent, "CENTER", 0, 150)
+	end
+	window.rows = {}
+
+	window.prev = CreateArrow("<", -1)
+	window.prev:SetPoint("TOPLEFT", WINDOW.padding - 2, -7)
+	window.next = CreateArrow(">", 1)
+	window.next:SetPoint("LEFT", window.prev, "RIGHT", 2, 0)
+	window.title = window:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	window.title:SetPoint("LEFT", window.next, "RIGHT", 6, 0)
+
+	local close = CreateFrame("Button", nil, window, "UIPanelCloseButton")
+	close:SetSize(24, 24)
+	close:SetPoint("TOPRIGHT", 1, 1)
+	close:SetScript("OnClick", function() window.setting:SetValue(false) end)
+
+	window:SetScript("OnShow", RefreshWindow)
+	window:Hide()
+end
+
+local function SetWindowShown(shown)
+	if shown and not window:IsShown() then window.level = nil end
+	window:SetShown(shown)
+end
+
+local function ToggleWindow()
+	window.setting:SetValue(not window:IsShown())
 end
 
 local function Flush()
@@ -58,6 +224,7 @@ local function Flush()
 		Log(string.format("level %d, %s: %d quest, %d %s", segment.level, segment.zone, questPart, segment.xp - questPart, rest))
 	end
 	pending = { segments = {}, questXP = 0 }
+	RefreshWindow()
 end
 
 local function ScheduleFlush()
@@ -99,48 +266,6 @@ local function IsExploreMessage(text)
 	return pattern and not (issecretvalue and issecretvalue(text)) and text:match(pattern) ~= nil
 end
 
-local function LevelTotals(level)
-	local bySource, byZone, total = {}, {}, 0
-	for zone, sources in pairs(db.levels[level] or {}) do
-		for source, xp in pairs(sources) do
-			bySource[source] = (bySource[source] or 0) + xp
-			byZone[zone] = (byZone[zone] or 0) + xp
-			total = total + xp
-		end
-	end
-	local zones = {}
-	for zone, xp in pairs(byZone) do table.insert(zones, { zone = zone, xp = xp }) end
-	table.sort(zones, function(a, b) return a.xp > b.xp end)
-	return bySource, zones, total
-end
-
-local function Percent(part, total)
-	return math.floor(part / total * 100 + 0.5)
-end
-
-local function ShowTooltipLines(bar)
-	if not db.settings.showTooltip then return end
-	local bySource, zones, total = LevelTotals(UnitLevel("player"))
-	if total <= 0 then return end
-	if GameTooltip:IsShown() then
-		GameTooltip_AddBlankLineToTooltip(GameTooltip)
-	else
-		GameTooltip:SetOwner(bar, "ANCHOR_CURSOR")
-	end
-	GameTooltip:AddLine("XP this level", NORMAL_FONT_COLOR:GetRGB())
-	for _, source in ipairs(SOURCES) do
-		local xp = bySource[source.key]
-		if xp then
-			GameTooltip:AddDoubleLine(source.label, string.format("%s (%d%%)", BreakUpLargeNumbers(xp), Percent(xp, total)), 1, 1, 1, 1, 1, 1)
-		end
-	end
-	for i = 1, math.min(#zones, MAX_TOOLTIP_ZONES) do
-		local entry = zones[i]
-		GameTooltip:AddDoubleLine(entry.zone, string.format("%d%%", Percent(entry.xp, total)), 0.7, 0.7, 0.7, 0.7, 0.7, 0.7)
-	end
-	GameTooltip:Show()
-end
-
 local function HookExperienceBars()
 	local barIndex = StatusTrackingBarInfo and StatusTrackingBarInfo.BarsEnum.Experience
 	if not barIndex then return end
@@ -149,7 +274,9 @@ local function HookExperienceBars()
 		local bar = container and container.bars and container.bars[barIndex]
 		if bar and not hooked[bar] then
 			hooked[bar] = true
-			bar:HookScript("OnEnter", ShowTooltipLines)
+			bar:HookScript("OnMouseUp", function(_, button)
+				if button == "LeftButton" then ToggleWindow() end
+			end)
 		end
 	end
 end
@@ -170,9 +297,7 @@ local function FormatLevel(level)
 end
 
 local function PrintHistory()
-	local levels = {}
-	for level in pairs(db.levels) do table.insert(levels, level) end
-	table.sort(levels)
+	local levels = RecordedLevels()
 	if #levels == 0 then
 		print(PREFIX .. "No XP recorded yet. Tracking starts when the addon is first loaded.")
 	end
@@ -182,16 +307,20 @@ end
 local function RegisterSettings()
 	local category = Settings.RegisterVerticalLayoutCategory("Sage QoL: Quest XP")
 	settingsCategory = category
-	local setting = Settings.RegisterAddOnSetting(category, "SageQoL_QuestXP_ShowSources", "showTooltip",
-		db.settings, type(true), "Show XP sources in XP bar tooltip", true)
-	Settings.CreateCheckbox(category, setting, "Lists this level's XP by source and zone when you hover the XP bar.")
+	local setting = Settings.RegisterAddOnSetting(category, "SageQoL_QuestXP_ShowSources", "showWindow",
+		db.settings, type(false), "Show XP sources window", false)
+	setting:SetValueChangedCallback(function(_, shown) SetWindowShown(shown) end)
+	Settings.CreateCheckbox(category, setting,
+		"A small movable window with each level's XP by source and zone. Clicking the XP bar also toggles it.")
 	Settings.RegisterAddOnCategory(category)
+	window.setting = setting
 end
 
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("PLAYER_XP_UPDATE")
+frame:RegisterEvent("PLAYER_LEVEL_UP")
 frame:RegisterEvent("QUEST_TURNED_IN")
 frame:RegisterEvent("CHAT_MSG_COMBAT_XP_GAIN")
 frame:RegisterEvent("CHAT_MSG_SYSTEM")
@@ -203,13 +332,16 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		db = SageQoL_QuestXPDB
 		db.levels = db.levels or {}
 		db.settings = db.settings or {}
-		if db.settings.showTooltip == nil then db.settings.showTooltip = true end
+		CreateWindow()
 		RegisterSettings()
 	elseif event == "PLAYER_ENTERING_WORLD" then
 		Snapshot()
 		HookExperienceBars()
+		SetWindowShown(db.settings.showWindow)
 	elseif event == "PLAYER_XP_UPDATE" then
 		OnXPUpdate()
+	elseif event == "PLAYER_LEVEL_UP" then
+		RefreshWindow()
 	elseif event == "QUEST_TURNED_IN" then
 		local _, xpReward = ...
 		pending.questXP = pending.questXP + (xpReward or 0)
@@ -237,10 +369,13 @@ SlashCmdList.SAGEQOLQUESTXP = function(msg)
 		print(PREFIX .. "Logging XP events for 60 seconds.")
 	elseif msg:match("^%s*reset") then
 		db.levels = {}
+		RefreshWindow()
 		print(PREFIX .. "History cleared.")
 	elseif msg:match("^%s*config") then
 		Settings.OpenToCategory(settingsCategory:GetID())
-	else
+	elseif msg:match("^%s*print") then
 		PrintHistory()
+	else
+		ToggleWindow()
 	end
 end
