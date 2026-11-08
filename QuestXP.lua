@@ -1,7 +1,7 @@
 local FILL = {
 	atlas = "UI-HUD-ExperienceBar-Fill-Experience",
 	r = 1, g = 0.82, b = 0,
-	alpha = 0.45,
+	alpha = 0.8,
 	edgeWidth = 2,
 }
 
