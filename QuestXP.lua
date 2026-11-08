@@ -34,13 +34,15 @@ end
 local function GetOverlay(bar)
 	local overlay = overlays[bar]
 	if not overlay then
-		overlay = bar:CreateTexture(nil, "ARTWORK", nil, 0)
+		-- The StatusBar child draws over its parent, so the fill lives on the StatusBar,
+		-- above its Background (BACKGROUND 0-1) and below the XP fill (BORDER).
+		overlay = bar.StatusBar:CreateTexture(nil, "BACKGROUND", nil, 2)
 		overlay:SetAtlas(FILL.atlas)
 		overlay:SetDesaturated(true)
 		overlay:SetVertexColor(FILL.r, FILL.g, FILL.b)
 		overlay:SetAlpha(FILL.alpha)
-		overlay:SetPoint("BOTTOMLEFT")
-		overlay:SetPoint("TOPLEFT")
+		overlay:SetPoint("BOTTOMLEFT", bar.StatusBar)
+		overlay:SetPoint("TOPLEFT", bar.StatusBar)
 		overlays[bar] = overlay
 	end
 	return overlay
@@ -59,7 +61,7 @@ local function ApplyOverlay(bar)
 	local ratio = Clamp((UnitXP("player") + pendingXP) / maxXP, 0, 1)
 	local overlay = GetOverlay(bar)
 	-- SetAtlas resets tex coords, so the crop is set after it and again on every resize.
-	overlay:SetWidth(math.max(ratio * bar:GetWidth(), 0.001))
+	overlay:SetWidth(math.max(ratio * bar.StatusBar:GetWidth(), 0.001))
 	overlay:SetTexCoord(0, ratio, 0, 1)
 	overlay:Show()
 end
