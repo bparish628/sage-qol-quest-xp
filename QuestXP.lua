@@ -3,6 +3,8 @@ local FILL = {
 	r = 1, g = 0.82, b = 0,
 	alpha = 0.8,
 	edgeWidth = 2,
+	labelFont = "NumberFontNormalSmall",
+	labelInset = 6,
 }
 
 local BAR_CONTAINERS = { "MainStatusTrackingBarContainer", "SecondaryStatusTrackingBarContainer" }
@@ -56,7 +58,11 @@ local function GetOverlay(bar)
 		edge:SetPoint("TOPRIGHT", fill)
 		edge:SetPoint("BOTTOMRIGHT", fill)
 
-		overlay = { fill = fill, edge = edge }
+		local label = statusBar:CreateFontString(nil, "OVERLAY", FILL.labelFont)
+		label:SetPoint("RIGHT", statusBar, "RIGHT", -FILL.labelInset, 0)
+		label:SetTextColor(FILL.r, FILL.g, FILL.b)
+
+		overlay = { fill = fill, edge = edge, label = label }
 		overlays[bar] = overlay
 	end
 	return overlay
@@ -67,6 +73,7 @@ local function HideOverlay(bar)
 	if overlay then
 		overlay.fill:Hide()
 		overlay.edge:Hide()
+		overlay.label:Hide()
 	end
 end
 
@@ -83,6 +90,8 @@ local function ApplyOverlay(bar)
 	overlay.fill:SetTexCoord(0, ratio, 0, 1)
 	overlay.fill:Show()
 	overlay.edge:SetShown(ratio < 1)
+	overlay.label:SetText("+" .. BreakUpLargeNumbers(pendingXP))
+	overlay.label:Show()
 end
 
 local function ShowTooltipLines(bar)
