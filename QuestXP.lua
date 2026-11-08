@@ -90,7 +90,7 @@ local function ApplyOverlay(bar)
 	overlay.fill:SetTexCoord(0, ratio, 0, 1)
 	overlay.fill:Show()
 	overlay.edge:SetShown(ratio < 1)
-	overlay.label:SetText("+" .. BreakUpLargeNumbers(pendingXP))
+	overlay.label:SetFormattedText("+%s (%d%%)", BreakUpLargeNumbers(pendingXP), math.floor(pendingXP / maxXP * 100))
 	overlay.label:Show()
 end
 
