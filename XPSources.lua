@@ -5,7 +5,6 @@ local SOURCES = {
 	{ key = "kill", label = "Kills", color = { 0.85, 0.3, 0.25 } },
 	{ key = "quest", label = "Quests", color = { 1, 0.82, 0 } },
 	{ key = "explore", label = "Exploration", color = { 0.35, 0.8, 0.4 } },
-	{ key = "other", label = "Other", color = { 0.6, 0.6, 0.6 } },
 }
 local ZONE_COLORS = {
 	{ 0.35, 0.6, 0.9 },
@@ -17,6 +16,8 @@ local ZONE_COLORS = {
 local OTHER_ZONES_COLOR = { 0.5, 0.5, 0.5 }
 -- XP and the event naming its source arrive in either order, so both wait this long to meet.
 local SETTLE_SECONDS = 0.3
+-- Discovery XP lands as you enter a new subzone, so XP this close to a subzone change is exploration.
+local EXPLORE_WINDOW_SECONDS = 1.5
 local BAR_CONTAINERS = { "MainStatusTrackingBarContainer", "SecondaryStatusTrackingBarContainer" }
 local WINDOW = {
 	width = 250, padding = 10, headerHeight = 32, headingHeight = 16, rowHeight = 15, sectionGap = 8,
@@ -27,10 +28,11 @@ local WINDOW = {
 local db
 local last = {}
 -- segments: XP gained since the last flush, already split at level boundaries.
--- questXP, sawKill, sawExplore: what named the source of that XP.
+-- xpAt: when that XP arrived. questXP, sawKill: what named its source.
 local pending = { segments = {}, questXP = 0 }
 local flushScheduled = false
 local logUntil = 0
+local lastZoneChangeAt
 local hooked = {}
 local settingsCategory
 local window
@@ -308,7 +310,11 @@ local function Flush()
 		return
 	end
 	local quest = pending.questXP
-	local rest = (pending.sawKill and "kill") or (pending.sawExplore and "explore") or "other"
+	-- Kills, quests, and exploration are the only XP in Forever, so XP that isn't a quest
+	-- reward and didn't come with a subzone change is from kills.
+	local nearZoneChange = lastZoneChangeAt and pending.xpAt
+		and math.abs(pending.xpAt - lastZoneChangeAt) <= EXPLORE_WINDOW_SECONDS
+	local rest = (nearZoneChange and not pending.sawKill) and "explore" or "kill"
 	for _, segment in ipairs(pending.segments) do
 		local questPart = math.min(quest, segment.xp)
 		quest = quest - questPart
@@ -328,6 +334,7 @@ end
 
 local function AddSegment(level, xp)
 	if xp <= 0 then return end
+	pending.xpAt = pending.xpAt or GetTime()
 	table.insert(pending.segments, { level = level, xp = xp, zone = GetRealZoneText() or UNKNOWN })
 end
 
@@ -345,18 +352,6 @@ local function OnXPUpdate()
 	Snapshot()
 	last.level = level
 	ScheduleFlush()
-end
-
-local function ExplorePattern()
-	if not ERR_ZONE_EXPLORED_XP then return nil end
-	local pattern = ERR_ZONE_EXPLORED_XP:gsub("[%(%)%.%+%-%*%?%[%]%^%$]", "%%%0")
-	pattern = pattern:gsub("%%s", ".+"):gsub("%%d", "%%d+")
-	return "^" .. pattern .. "$"
-end
-
-local function IsExploreMessage(text)
-	local pattern = ExplorePattern()
-	return pattern and not (issecretvalue and issecretvalue(text)) and text:match(pattern) ~= nil
 end
 
 local function HookExperienceBars()
@@ -416,8 +411,9 @@ frame:RegisterEvent("PLAYER_XP_UPDATE")
 frame:RegisterEvent("PLAYER_LEVEL_UP")
 frame:RegisterEvent("QUEST_TURNED_IN")
 frame:RegisterEvent("CHAT_MSG_COMBAT_XP_GAIN")
-frame:RegisterEvent("CHAT_MSG_SYSTEM")
-frame:RegisterEvent("UI_INFO_MESSAGE")
+frame:RegisterEvent("ZONE_CHANGED")
+frame:RegisterEvent("ZONE_CHANGED_INDOORS")
+frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 frame:SetScript("OnEvent", function(_, event, ...)
 	if event == "ADDON_LOADED" then
 		if ... ~= ADDON_NAME then return end
@@ -425,6 +421,10 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		db = SageQoL_QuestXPDB
 		db.levels = db.levels or {}
 		db.settings = db.settings or {}
+		-- Older versions had an "other" source; that XP can't be placed now.
+		for _, zones in pairs(db.levels) do
+			for _, sources in pairs(zones) do sources.other = nil end
+		end
 		CreateWindow()
 		RegisterSettings()
 	elseif event == "PLAYER_ENTERING_WORLD" then
@@ -445,12 +445,8 @@ frame:SetScript("OnEvent", function(_, event, ...)
 		Log("combat XP message")
 		ScheduleFlush()
 	else
-		local text = event == "UI_INFO_MESSAGE" and select(2, ...) or ...
-		if IsExploreMessage(text) then
-			pending.sawExplore = true
-			Log("exploration message")
-			ScheduleFlush()
-		end
+		lastZoneChangeAt = GetTime()
+		Log("entered " .. (GetSubZoneText() ~= "" and GetSubZoneText() or GetRealZoneText()))
 	end
 end)
 
