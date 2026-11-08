@@ -7,13 +7,20 @@ local SOURCES = {
 	{ key = "explore", label = "Exploration", color = { 0.35, 0.8, 0.4 } },
 	{ key = "other", label = "Other", color = { 0.6, 0.6, 0.6 } },
 }
-local ZONE_COLOR = { 0.35, 0.6, 0.9 }
+local ZONE_COLORS = {
+	{ 0.35, 0.6, 0.9 },
+	{ 0.65, 0.45, 0.85 },
+	{ 0.3, 0.75, 0.7 },
+	{ 0.9, 0.55, 0.3 },
+	{ 0.8, 0.4, 0.6 },
+}
+local OTHER_ZONES_COLOR = { 0.5, 0.5, 0.5 }
 -- XP and the event naming its source arrive in either order, so both wait this long to meet.
 local SETTLE_SECONDS = 0.3
 local BAR_CONTAINERS = { "MainStatusTrackingBarContainer", "SecondaryStatusTrackingBarContainer" }
 local WINDOW = {
-	width = 280, padding = 10, rowHeight = 16, headerHeight = 32, maxZones = 5,
-	labelWidth = 92, valueWidth = 70, barHeight = 8, trackColor = { 1, 1, 1, 0.08 },
+	width = 250, padding = 10, headerHeight = 32, headingHeight = 16, rowHeight = 15, sectionGap = 8,
+	barHeight = 12, barGap = 6, segmentGap = 1, swatchSize = 9, valueWidth = 80, trackColor = { 1, 1, 1, 0.08 },
 }
 
 -- SageQoL_QuestXPDB.levels[level][zone][sourceKey] = xp
@@ -27,8 +34,8 @@ local logUntil = 0
 local hooked = {}
 local settingsCategory
 local window
--- Fixed by the layout, so bars size correctly before the window has been laid out.
-local BAR_WIDTH = WINDOW.width - 2 * WINDOW.padding - WINDOW.labelWidth - WINDOW.valueWidth - 8
+-- Computed from the layout, so segments size correctly before the window has been laid out.
+local BAR_WIDTH = WINDOW.width - 2 * WINDOW.padding
 
 local function Log(text)
 	if GetTime() < logUntil then print(PREFIX .. text) end
@@ -91,56 +98,122 @@ local function StepLevel(direction)
 	return target
 end
 
-local function GetRow(index)
-	local row = window.rows[index]
+local function Place(region, x, y)
+	region:ClearAllPoints()
+	region:SetPoint("TOPLEFT", window, "TOPLEFT", x, -y)
+end
+
+local function SourceEntries(bySource)
+	local entries = {}
+	for _, source in ipairs(SOURCES) do
+		local xp = bySource[source.key]
+		if xp then table.insert(entries, { label = source.label, color = source.color, xp = xp }) end
+	end
+	return entries
+end
+
+-- The top zones get their own colors; the rest share one so the bar still adds up to the level.
+local function ZoneEntries(zones)
+	local entries, restXP = {}, 0
+	for i, entry in ipairs(zones) do
+		if i <= #ZONE_COLORS then
+			table.insert(entries, { label = entry.zone, color = ZONE_COLORS[i], xp = entry.xp })
+		else
+			restXP = restXP + entry.xp
+		end
+	end
+	if restXP > 0 then
+		table.insert(entries, { label = "Other zones", color = OTHER_ZONES_COLOR, xp = restXP })
+	end
+	return entries
+end
+
+local function CreateSection()
+	local section = { segments = {}, rows = {} }
+	section.heading = window:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	section.track = window:CreateTexture(nil, "ARTWORK")
+	section.track:SetColorTexture(unpack(WINDOW.trackColor))
+	section.track:SetSize(BAR_WIDTH, WINDOW.barHeight)
+	return section
+end
+
+local function GetLegendRow(section, index)
+	local row = section.rows[index]
 	if not row then
-		row = CreateFrame("Frame", nil, window)
-		row:SetHeight(WINDOW.rowHeight)
-		row:SetPoint("TOPLEFT", WINDOW.padding, -(WINDOW.headerHeight + (index - 1) * WINDOW.rowHeight))
-		row:SetPoint("RIGHT", -WINDOW.padding, 0)
-		row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		row.label:SetPoint("LEFT")
-		row.label:SetWidth(WINDOW.labelWidth)
+		row = {
+			swatch = window:CreateTexture(nil, "OVERLAY"),
+			label = window:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"),
+			value = window:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"),
+		}
+		row.swatch:SetSize(WINDOW.swatchSize, WINDOW.swatchSize)
+		row.label:SetWidth(BAR_WIDTH - WINDOW.swatchSize - WINDOW.valueWidth - 10)
 		row.label:SetJustifyH("LEFT")
 		row.label:SetWordWrap(false)
-		row.value = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		row.value:SetPoint("RIGHT")
 		row.value:SetWidth(WINDOW.valueWidth)
 		row.value:SetJustifyH("RIGHT")
-		row.track = row:CreateTexture(nil, "ARTWORK")
-		row.track:SetColorTexture(unpack(WINDOW.trackColor))
-		row.track:SetHeight(WINDOW.barHeight)
-		row.track:SetPoint("LEFT", WINDOW.labelWidth + 4, 0)
-		row.track:SetPoint("RIGHT", -(WINDOW.valueWidth + 4), 0)
-		row.fill = row:CreateTexture(nil, "OVERLAY")
-		row.fill:SetHeight(WINDOW.barHeight)
-		row.fill:SetPoint("LEFT", row.track)
-		window.rows[index] = row
+		section.rows[index] = row
 	end
 	return row
 end
 
--- Each line is a bar row ({ label, value, fraction, color }) or a heading ({ label, heading = true }).
-local function WindowLines(level)
-	local bySource, zones, total = LevelTotals(level)
-	if total <= 0 then
-		return { { label = "No XP recorded yet", heading = true } }
-	end
-	local lines = {}
-	for _, source in ipairs(SOURCES) do
-		local xp = bySource[source.key]
-		if xp then
-			table.insert(lines, { label = source.label, color = source.color, fraction = xp / total,
-				value = string.format("%s  %d%%", BreakUpLargeNumbers(xp), Percent(xp, total)) })
+local function HideFrom(list, first, hide)
+	for index = first, #list do hide(list[index]) end
+end
+
+local function HideLegendRow(row)
+	row.swatch:Hide()
+	row.label:Hide()
+	row.value:Hide()
+end
+
+local function HideSection(section)
+	section.heading:Hide()
+	section.track:Hide()
+	HideFrom(section.segments, 1, function(segment) segment:Hide() end)
+	HideFrom(section.rows, 1, HideLegendRow)
+end
+
+-- Draws a heading, a bar split by each entry's share of total, and a legend. Returns the y below it.
+local function LayoutSection(section, title, entries, total, y)
+	section.heading:SetText(title)
+	Place(section.heading, WINDOW.padding, y)
+	section.heading:Show()
+	y = y + WINDOW.headingHeight
+
+	Place(section.track, WINDOW.padding, y)
+	section.track:Show()
+	local x = WINDOW.padding
+	for index, entry in ipairs(entries) do
+		local segment = section.segments[index]
+		if not segment then
+			segment = window:CreateTexture(nil, "OVERLAY")
+			section.segments[index] = segment
 		end
+		local width = math.max(entry.xp / total * BAR_WIDTH - WINDOW.segmentGap, 1)
+		segment:SetColorTexture(entry.color[1], entry.color[2], entry.color[3], 0.9)
+		segment:SetSize(width, WINDOW.barHeight)
+		Place(segment, x, y)
+		segment:Show()
+		x = x + width + WINDOW.segmentGap
 	end
-	table.insert(lines, { label = "Zones", heading = true })
-	for i = 1, math.min(#zones, WINDOW.maxZones) do
-		local entry = zones[i]
-		table.insert(lines, { label = entry.zone, color = ZONE_COLOR, fraction = entry.xp / total,
-			value = string.format("%d%%", Percent(entry.xp, total)) })
+	HideFrom(section.segments, #entries + 1, function(segment) segment:Hide() end)
+	y = y + WINDOW.barHeight + WINDOW.barGap
+
+	for index, entry in ipairs(entries) do
+		local row = GetLegendRow(section, index)
+		row.swatch:SetColorTexture(entry.color[1], entry.color[2], entry.color[3], 0.9)
+		Place(row.swatch, WINDOW.padding, y + 2)
+		row.label:SetText(entry.label)
+		Place(row.label, WINDOW.padding + WINDOW.swatchSize + 5, y)
+		row.value:SetFormattedText("%s  %d%%", BreakUpLargeNumbers(entry.xp), Percent(entry.xp, total))
+		Place(row.value, WINDOW.width - WINDOW.padding - WINDOW.valueWidth, y)
+		row.swatch:Show()
+		row.label:Show()
+		row.value:Show()
+		y = y + WINDOW.rowHeight
 	end
-	return lines
+	HideFrom(section.rows, #entries + 1, HideLegendRow)
+	return y
 end
 
 local function RefreshWindow()
@@ -150,25 +223,17 @@ local function RefreshWindow()
 	window.prev:SetEnabled(StepLevel(-1) ~= nil)
 	window.next:SetEnabled(window.level ~= nil)
 
-	local lines = WindowLines(level)
-	for index, line in ipairs(lines) do
-		local row = GetRow(index)
-		row.label:SetText(line.label)
-		row.label:SetFontObject(line.heading and "GameFontNormalSmall" or "GameFontHighlightSmall")
-		row.value:SetText(line.value or "")
-		row.track:SetShown(not line.heading)
-		row.fill:SetShown(not line.heading)
-		if not line.heading then
-			row.fill:SetColorTexture(line.color[1], line.color[2], line.color[3], 0.9)
-			-- A zero width would drop the texture's anchor, so the smallest bar is a sliver.
-			row.fill:SetWidth(math.max(line.fraction * BAR_WIDTH, 1))
-		end
-		row:Show()
+	local bySource, zones, total = LevelTotals(level)
+	window.empty:SetShown(total <= 0)
+	if total <= 0 then
+		HideSection(window.sources)
+		HideSection(window.zones)
+		window:SetHeight(WINDOW.headerHeight + WINDOW.rowHeight + WINDOW.padding)
+		return
 	end
-	for index = #lines + 1, #window.rows do
-		window.rows[index]:Hide()
-	end
-	window:SetHeight(WINDOW.headerHeight + #lines * WINDOW.rowHeight + WINDOW.padding)
+	local y = LayoutSection(window.sources, "Sources", SourceEntries(bySource), total, WINDOW.headerHeight)
+	y = LayoutSection(window.zones, "Zones", ZoneEntries(zones), total, y + WINDOW.sectionGap)
+	window:SetHeight(y + WINDOW.padding)
 end
 
 local function CreateArrow(text, direction)
@@ -202,7 +267,11 @@ local function CreateWindow()
 	else
 		window:SetPoint("CENTER", UIParent, "CENTER", 0, 150)
 	end
-	window.rows = {}
+	window.sources = CreateSection()
+	window.zones = CreateSection()
+	window.empty = window:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+	window.empty:SetText("No XP recorded yet")
+	window.empty:SetPoint("TOPLEFT", WINDOW.padding, -WINDOW.headerHeight)
 
 	window.prev = CreateArrow("<", -1)
 	window.prev:SetPoint("TOPLEFT", WINDOW.padding - 2, -7)
