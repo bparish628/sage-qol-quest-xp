@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: Sage QoL: Quest XP
+## Notes: Shades the XP bar with the XP you will have after turning in your completed quests.
+## Author: bparish628
+## Version: @project-version@
+## IconTexture: Interface\Icons\INV_Misc_Note_01
+## Category: Sage QoL
+
+QuestXP.lua

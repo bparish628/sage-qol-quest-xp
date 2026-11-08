@@ -1,0 +1,11 @@
+{
+  "name": "sage-qol-quest-xp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check.mjs"
+  },
+  "devDependencies": {
+    "luaparse": "^0.3.1"
+  }
+}
